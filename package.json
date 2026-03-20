@@ -1,0 +1,14 @@
+{
+  "name": "dischem-bot",
+  "version": "1.0.0",
+  "description": "Automated Dis-Chem BI export bot",
+  "scripts": {
+    "run-now": "node src/bot.js",
+    "schedule": "node src/scheduler.js",
+    "capture": "node src/capture.js"
+  },
+  "dependencies": {
+    "node-cron": "^3.0.3",
+    "playwright": "^1.42.0"
+  }
+}

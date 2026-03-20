@@ -1,0 +1,5 @@
+node_modules/
+downloads/
+capture-log.json
+clients.json
+*.png
