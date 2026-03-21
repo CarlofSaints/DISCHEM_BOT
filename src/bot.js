@@ -7,6 +7,8 @@ const REPORT_URL =
   '?document=sales%20analysis%20-%20daily%20detail.qvw' +
   '&lang=en-US&host=QVS%40qv-webserver';
 
+const BOOKMARK_NAME = 'VITAL BOT';
+
 async function runExport(client) {
   const { name, username, password, downloadDir } = client;
 
@@ -27,26 +29,13 @@ async function runExport(client) {
 
   const page = await context.newPage();
 
-  // Track QV session state from response bodies
-  const qvState = { mark: '', stamp: '' };
-  page.on('response', async (res) => {
-    if (!res.url().includes('QvsViewClient')) return;
-    try {
-      const text = await res.text();
-      const m = text.match(/\bmark="([0-9a-f]{16})"/);
-      if (m?.[1]) qvState.mark = m[1];
-      const s = text.match(/\bstamp="([0-9a-f]{16})"/);
-      if (s?.[1]) qvState.stamp = s[1];
-    } catch {}
-  });
-
   try {
-    // ── STEP 1: Navigate ───────────────────────────────────────────────────────
+    // ── STEP 1: Navigate ──────────────────────────────────────────────────────
     console.log(`[${name}] Navigating...`);
     await page.goto(REPORT_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
     await page.waitForTimeout(3_000);
 
-    // ── STEP 2: QlikView internal Userid/Password modal ────────────────────────
+    // ── STEP 2: Login modal ───────────────────────────────────────────────────
     console.log(`[${name}] Checking for login modal...`);
     for (const frame of page.frames()) {
       try {
@@ -61,110 +50,185 @@ async function runExport(client) {
       } catch {}
     }
 
-    // ── STEP 3: Wait for app ───────────────────────────────────────────────────
+    // ── STEP 3: Wait for app ──────────────────────────────────────────────────
     console.log(`[${name}] Waiting for app to load...`);
     await page.waitForSelector('text=General Info', { timeout: 90_000 });
     await page.waitForTimeout(3_000);
 
-    // ── STEP 4: Sales tab ──────────────────────────────────────────────────────
-    console.log(`[${name}] Clicking Sales tab...`);
-    await page.locator('text=Sales').first().click();
-    console.log(`[${name}] Waiting 15s for Sales panel to render...`);
-    await page.waitForTimeout(15_000);
+    // ── STEP 4: Set up download listeners BEFORE triggering export ────────────
+    const EXPORT_TIMEOUT = 900_000; // 15 min
 
-    if (!qvState.mark) throw new Error('No QlikView session mark captured');
-    console.log(`[${name}] QV session → mark: ${qvState.mark}  stamp: ${qvState.stamp}`);
+    const popupPromise = context.waitForEvent('page', { timeout: EXPORT_TIMEOUT })
+      .then(popup => ({ via: 'popup', popup }))
+      .catch(() => null);
 
-    // ── STEP 5: Listen for the download popup BEFORE triggering the export ─────
-    // When export completes, QlikView's JS receives <open url="$/file.xlsx"/>
-    // and calls window.open() — Playwright catches that as a new context page.
-    const popupPromise = context.waitForEvent('page', { timeout: 120_000 });
+    const directDownloadPromise = page.waitForEvent('download', { timeout: EXPORT_TIMEOUT })
+      .then(dl => ({ via: 'direct', dl }))
+      .catch(() => null);
 
-    // Handle the "opened in another window" dialog (fire-and-forget)
-    page.locator('text=opened in another window').waitFor({ timeout: 90_000 })
-      .then(() => page.locator('button:has-text("OK")').click().catch(() => {}))
-      .catch(() => {});
+    // ── STEP 5: Open the bookmark ─────────────────────────────────────────────
+    // The bookmark selector in QlikView is a TEXT INPUT in the toolbar (not a button).
+    // You type the bookmark name and press Enter / select from dropdown.
+    console.log(`[${name}] Opening bookmark "${BOOKMARK_NAME}" via toolbar input...`);
+    let bookmarkApplied = false;
 
-    // ── STEP 6: Inject commands via QlikView's OWN poll requests ───────────────
-    // CSRF fix: we do NOT generate our own xrfkey. Instead we intercept QV's polls,
-    // replace only the request body with our commands, and keep the URL unchanged.
-    // QV's own xrfkey (URL param) still matches QV's own cookie → CSRF check passes.
-    console.log(`[${name}] Setting up command injection...`);
+    // Strategy 1: known selectors for the bookmark input
+    const bookmarkInputSelectors = [
+      'input[placeholder="Select Bookmark"]',  // confirmed from diagnostic
+      'input[placeholder*="Bookmark"]',
+      'input[title*="Bookmark"]',
+      'input[title*="bookmark"]',
+      'select[title*="Bookmark"]',
+      'input[id*="ookmark"]',
+      'select[id*="ookmark"]',
+      'input[name*="ookmark"]',
+    ];
+    for (const sel of bookmarkInputSelectors) {
+      try {
+        const el = page.locator(sel).first();
+        await el.waitFor({ timeout: 2_000, state: 'visible' });
+        // Click to focus, triple-click to clear, then type char-by-char to trigger autocomplete
+        await el.click({ clickCount: 3 });
+        await page.waitForTimeout(300);
+        await el.pressSequentially(BOOKMARK_NAME, { delay: 80 });
+        console.log(`[${name}] Bookmark input found (${sel}), typed "${BOOKMARK_NAME}" — waiting for dropdown...`);
+        await page.waitForTimeout(1_500);
 
-    const cmdState = { phase: 'idle', reTime: null };
+        // Keyboard-navigate the dropdown: ArrowDown highlights first item, Enter selects it
+        await el.press('ArrowDown');
+        await page.waitForTimeout(300);
+        await el.press('Enter');
+        console.log(`[${name}] ArrowDown + Enter sent to select bookmark.`);
+        bookmarkApplied = true;
+        break;
+      } catch {}
+    }
 
-    await page.route('**/QvsViewClient.aspx**', async (route) => {
-      const reqBody = route.request().postData() || '';
-
-      // Use the stamp from the intercepted request (QV's last known stamp)
-      const stampM = reqBody.match(/\bstamp="([0-9a-f]{16})"/);
-      const curStamp = stampM?.[1] || qvState.stamp;
-
-      const mkUpdate = (inner) =>
-        `<update mark="${qvState.mark}" stamp="${curStamp}" cookie="true" scope="Document"` +
-        ` view="sales analysis - daily detail.qvw" ident="null"` +
-        ` userid="${username}" password="${password}">${inner}</update>`;
-
-      if (cmdState.phase === 'idle') {
-        // ── Injection 1: Document.9.RE — activate report object 9 ──────────────
-        cmdState.phase = 'injected-re';
-        cmdState.reTime = Date.now();
-        console.log(`[${name}] → Injecting Document.9.RE (activate "Store Total Sales Daily by Article")...`);
-        try {
-          const resp = await route.fetch({ postData: mkUpdate('<set name="Document.9.RE" action="" />') });
-          const text = await resp.text();
-          const newStamp = text.match(/\bstamp="([0-9a-f]{16})"/)?.[1];
-          if (newStamp) qvState.stamp = newStamp;
-          console.log(`[${name}]   RE response (stamp ${newStamp}): ${text.slice(0, 300)}`);
-          await route.fulfill({ status: resp.status(), contentType: 'text/xml; charset=UTF-8', body: text });
-        } catch (e) {
-          console.warn(`[${name}]   RE injection failed (${e.message}), continuing...`);
-          await route.continue();
-        }
-
-      } else if (cmdState.phase === 'injected-re') {
-        const elapsed = Date.now() - cmdState.reTime;
-        if (elapsed >= 3000) {
-          // ── Injection 2: Document.9.XL — trigger Excel export ────────────────
-          cmdState.phase = 'injected-xl';
-          console.log(`[${name}] → Injecting Document.9.XL (trigger Excel export, ${elapsed}ms after RE)...`);
-          try {
-            const resp = await route.fetch({
-              postData: mkUpdate('<set name="Document.9.XL" action="" clientsizeWH="1905:945" />'),
-            });
-            const text = await resp.text();
-            console.log(`[${name}]   XL response: ${text.slice(0, 300)}`);
-            await route.fulfill({ status: resp.status(), contentType: 'text/xml; charset=UTF-8', body: text });
-            console.log(`[${name}] Export triggered. QlikView will poll until ready (~30–60 s)...`);
-          } catch (e) {
-            console.warn(`[${name}]   XL injection failed (${e.message}), continuing...`);
-            await route.continue();
+    // Strategy 2: find all visible text inputs in the toolbar area (y < 120px from top)
+    if (!bookmarkApplied) {
+      try {
+        const inputs = await page.locator('input:visible').all();
+        for (const input of inputs) {
+          const box = await input.boundingBox();
+          if (box && box.y < 120) {
+            try {
+              await input.click({ clickCount: 3 });
+              await input.fill(BOOKMARK_NAME);
+              await input.press('Enter');
+              console.log(`[${name}] Bookmark input found by position (y=${Math.round(box.y)}), typed "${BOOKMARK_NAME}" + Enter.`);
+              bookmarkApplied = true;
+              break;
+            } catch {}
           }
-
-        } else {
-          // Still within 3s of RE — pass through normally
-          await route.continue();
         }
+      } catch {}
+    }
 
-      } else {
-        // After XL injected: pass all requests through.
-        // QV's JS polls, gets <open url="$/file.xlsx"/>, calls window.open().
-        await route.continue();
+    // Strategy 3: try <select> elements near the top of the page
+    if (!bookmarkApplied) {
+      try {
+        const selects = await page.locator('select:visible').all();
+        for (const sel of selects) {
+          const box = await sel.boundingBox();
+          if (box && box.y < 120) {
+            try {
+              await sel.selectOption({ label: BOOKMARK_NAME });
+              console.log(`[${name}] Bookmark select found by position (y=${Math.round(box.y)}), selected "${BOOKMARK_NAME}".`);
+              bookmarkApplied = true;
+              break;
+            } catch {}
+          }
+        }
+      } catch {}
+    }
+
+    if (!bookmarkApplied) {
+      // Diagnostic: dump all inputs + selects so we can identify the bookmark field
+      const diag = await page.evaluate(() => {
+        return [...document.querySelectorAll('input, select')].map(el => ({
+          tag: el.tagName,
+          type: el.getAttribute('type'),
+          id: el.id || null,
+          name: el.getAttribute('name') || null,
+          title: el.getAttribute('title') || null,
+          value: (el.value || '').slice(0, 50) || null,
+          placeholder: el.getAttribute('placeholder') || null,
+          pos: (() => {
+            const r = el.getBoundingClientRect();
+            return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width) };
+          })(),
+        }));
+      });
+      console.log(`[${name}] DIAGNOSTIC — all inputs/selects:`, JSON.stringify(diag, null, 2));
+      throw new Error(`Could not find bookmark input field — see DIAGNOSTIC above`);
+    }
+
+    console.log(`[${name}] Waiting for report to load from bookmark...`);
+    await page.waitForTimeout(12_000);
+
+    // ── STEP 6: Click "Send to Excel" ────────────────────────────────────────
+    // After bookmark applies, the report grid appears with a toolbar.
+    // The Excel export button has title="Send to Excel".
+    console.log(`[${name}] Looking for "Send to Excel" button...`);
+    const excelSelectors = [
+      '[title="Send to Excel"]',
+      '[title*="Excel"]',
+      '[alt*="Excel"]',
+    ];
+    let excelFound = false;
+    for (const frame of page.frames()) {
+      for (const sel of excelSelectors) {
+        try {
+          const loc = frame.locator(sel).first();
+          await loc.waitFor({ timeout: 5_000, state: 'visible' });
+          await loc.click();
+          console.log(`[${name}] "Send to Excel" clicked (selector: ${sel}).`);
+          excelFound = true;
+          break;
+        } catch {}
       }
-    });
+      if (excelFound) break;
+    }
 
-    // ── STEP 7: Wait for the export popup ─────────────────────────────────────
-    const popup = await popupPromise;
-    console.log(`[${name}] Popup opened: ${popup.url()}`);
+    if (!excelFound) {
+      // Diagnostic for the export button
+      const diag = await page.evaluate(() => {
+        return [...document.querySelectorAll('[title]')]
+          .map(el => el.getAttribute('title'))
+          .filter(t => t && t.length > 0);
+      });
+      console.log(`[${name}] DIAGNOSTIC — all [title] attrs after bookmark:`, JSON.stringify(diag, null, 2));
+      throw new Error('Could not find "Send to Excel" button — see DIAGNOSTIC above');
+    }
 
-    // ── STEP 8: Save the downloaded file ──────────────────────────────────────
-    const download = await popup.waitForEvent('download', { timeout: 60_000 });
+    // ── STEP 7: Wait for export to complete ──────────────────────────────────
+    console.log(`[${name}] Export triggered. Waiting for file (large datasets take several minutes)...`);
+    const exportResult = await Promise.race([popupPromise, directDownloadPromise]);
+    if (!exportResult) throw new Error('Export timed out — no popup or download detected');
+    console.log(`[${name}] Export delivered via: ${exportResult.via}`);
+
+    // ── STEP 8: Save file ─────────────────────────────────────────────────────
     const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
     const filename = `${name}_StoreTotalSalesDailyByArticle_${dateStr}.xlsx`;
     const savePath = path.join(downloadDir, filename);
+
+    let download;
+    if (exportResult.via === 'popup') {
+      console.log(`[${name}] Popup URL: ${exportResult.popup.url()}`);
+      download = await exportResult.popup.waitForEvent('download', { timeout: 300_000 });
+      try { exportResult.popup.close(); } catch {}
+    } else {
+      download = exportResult.dl;
+    }
+
+    console.log(`[${name}] Saving to: ${savePath}`);
     await download.saveAs(savePath);
-    console.log(`[${name}] ✓ Saved: ${savePath}`);
-    try { await popup.close(); } catch {}
+    if (fs.existsSync(savePath)) {
+      const bytes = fs.statSync(savePath).size;
+      console.log(`[${name}] ✓ Saved: ${savePath} (${(bytes / 1024).toFixed(1)} KB)`);
+    } else {
+      console.warn(`[${name}] WARNING: file not found after saveAs`);
+    }
 
   } catch (err) {
     console.error(`[${name}] ERROR:`, err.message);
@@ -173,8 +237,8 @@ async function runExport(client) {
       await page.screenshot({ path: ssPath, fullPage: true });
       console.error(`[${name}] Screenshot saved: ${ssPath}`);
     } catch {}
-    console.error(`[${name}] Browser stays open for 30 s — check what's on screen...`);
-    await page.waitForTimeout(30_000);
+    console.error(`[${name}] Browser stays open for 60 s — check what's on screen...`);
+    await page.waitForTimeout(60_000);
     throw err;
   } finally {
     await browser.close();
