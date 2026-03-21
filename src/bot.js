@@ -1,3 +1,4 @@
+require('dotenv').config();
 const { chromium } = require('playwright');
 const path = require('path');
 const fs = require('fs');
@@ -32,7 +33,22 @@ async function runExport(client) {
   try {
     // ── STEP 1: Navigate ──────────────────────────────────────────────────────
     console.log(`[${name}] Navigating...`);
-    await page.goto(REPORT_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    try {
+      await page.goto(REPORT_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    } catch (navErr) {
+      const msg = navErr.message ?? '';
+      if (
+        msg.includes('ECONNREFUSED') ||
+        msg.includes('ERR_NAME_NOT_RESOLVED') ||
+        msg.includes('ERR_CONNECTION_REFUSED') ||
+        msg.includes('ERR_INTERNET_DISCONNECTED') ||
+        msg.includes('net::ERR_') ||
+        msg.includes('NS_ERROR_NET')
+      ) {
+        throw new Error(`SITE_DOWN: ${msg}`);
+      }
+      throw navErr;
+    }
     await page.waitForTimeout(3_000);
 
     // ── STEP 2: Login modal ───────────────────────────────────────────────────
@@ -223,12 +239,17 @@ async function runExport(client) {
 
     console.log(`[${name}] Saving to: ${savePath}`);
     await download.saveAs(savePath);
+
+    let fileSizeKb = null;
     if (fs.existsSync(savePath)) {
       const bytes = fs.statSync(savePath).size;
-      console.log(`[${name}] ✓ Saved: ${savePath} (${(bytes / 1024).toFixed(1)} KB)`);
+      fileSizeKb = bytes / 1024;
+      console.log(`[${name}] ✓ Saved: ${savePath} (${fileSizeKb.toFixed(1)} KB)`);
     } else {
       console.warn(`[${name}] WARNING: file not found after saveAs`);
     }
+
+    return { filePath: savePath, fileSizeKb };
 
   } catch (err) {
     console.error(`[${name}] ERROR:`, err.message);
