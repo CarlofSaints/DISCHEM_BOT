@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Automated Dis-Chem BI export bot",
   "scripts": {
-    "run-now": "node src/bot.js",
+    "run-now": "node src/run-now.js",
     "schedule": "node src/scheduler.js",
     "capture": "node src/capture.js"
   },
