@@ -99,56 +99,37 @@ async function main() {
 
   const page = await context.newPage();
 
-  // ── Step 1: Access Point — clears any stale QlikView session ─────────────────
-  // Going straight to opendoc.htm reuses QlikView's server-side session for this
-  // Windows identity (Carl).  Hitting the Access Point first lets QlikView's own
-  // login flow start fresh, and may show a logout option we can click.
-  const ACCESS_POINT = 'https://bi.dischem.co.za/QvAJAXZfc/';
-  console.log('Navigating to QlikView Access Point...');
-  await page.goto(ACCESS_POINT, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForTimeout(2_000);
-
-  // Save a screenshot so we can see what the Access Point looks like
-  const screenshotPath = path.join(__dirname, '..', 'debug-access-point.png');
-  await page.screenshot({ path: screenshotPath, fullPage: true });
-  console.log(`Access Point URL:   ${page.url()}`);
-  console.log(`Access Point title: ${await page.title()}`);
-  console.log(`Screenshot saved → ${screenshotPath}\n`);
-
-  // Try common QlikView logout patterns
-  let loggedOut = false;
-  const logoutSelectors = [
-    'a:has-text("Logout")',
-    'a:has-text("Log Out")',
-    'a:has-text("Log off")',
-    'a:has-text("Sign out")',
-    'button:has-text("Logout")',
-    '[id*="logout" i]',
-    '[class*="logout" i]',
-    '[href*="logout" i]',
-  ];
-  for (const sel of logoutSelectors) {
-    try {
-      const el = page.locator(sel).first();
-      if (await el.isVisible({ timeout: 1_000 })) {
-        console.log(`Found logout element (${sel}) — clicking...`);
-        await el.click();
-        await page.waitForTimeout(2_000);
-        loggedOut = true;
-        break;
-      }
-    } catch {}
-  }
-  if (!loggedOut) {
-    console.log('No logout button found on Access Point — continuing to report.\n');
-  }
-
-  // ── Step 2: Navigate to the report ───────────────────────────────────────────
-  console.log('Navigating to report...');
+  // ── Step 1: Navigate to report, then clear cookies to bust the ghost session ──
+  // QlikView maintains a server-side session cookie tied to the Windows identity.
+  // If a previous client run left a session alive (Avid, etc.), opendoc.htm will
+  // reuse that session and show a blank page with no login form.
+  // Fix: navigate once (NTLM auth passes), note what cookies QlikView set, clear
+  // them all, then reload — QlikView sees no session cookie and presents a fresh
+  // login form.
+  console.log('First pass — establishing NTLM auth and capturing session cookies...');
   await page.goto(REPORT_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
   await page.waitForTimeout(3_000);
 
-  // Log where we landed — helps diagnose auth differences between clients
+  const screenshotPath = path.join(__dirname, '..', 'debug-before-clear.png');
+  await page.screenshot({ path: screenshotPath, fullPage: true });
+  console.log(`URL after first pass:   ${page.url()}`);
+  console.log(`Title after first pass: ${await page.title()}`);
+  console.log(`Screenshot saved → ${screenshotPath}`);
+
+  const cookies = await context.cookies();
+  console.log(`Session cookies found: ${cookies.map((c) => c.name).join(', ') || 'none'}`);
+
+  if (cookies.length > 0) {
+    console.log('Clearing cookies to force a fresh QlikView session...');
+    await context.clearCookies();
+    console.log('Reloading...\n');
+    await page.goto(REPORT_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    await page.waitForTimeout(3_000);
+  } else {
+    console.log('No cookies to clear — QlikView may use server-side session only.\n');
+  }
+
+  // Log where we landed after cookie clear
   console.log(`Page URL:   ${page.url()}`);
   console.log(`Page title: ${await page.title()}\n`);
 
