@@ -11,6 +11,7 @@
  */
 require('dotenv').config();
 const { chromium } = require('playwright');
+const { execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
@@ -67,6 +68,22 @@ async function main() {
   console.log('='.repeat(60));
   console.log('\nOpening browser — logging in as this client...\n');
 
+  // ── Override Windows credentials for bi.dischem.co.za ────────────────────────
+  // The Dis-Chem BI server uses Windows NTLM authentication, which Chromium
+  // handles at the OS level using whoever is currently logged into Windows.
+  // cmdkey lets us store per-server credentials so Windows uses the CLIENT'S
+  // account for this hostname instead of your own Windows session.
+  const HOST = 'bi.dischem.co.za';
+  try {
+    execSync(`cmdkey /delete:${HOST}`, { stdio: 'ignore' });
+  } catch { /* nothing stored yet — that's fine */ }
+  try {
+    execSync(`cmdkey /add:${HOST} /user:${username} /pass:${password}`);
+    console.log(`Windows credentials set for ${HOST} → ${username}`);
+  } catch (e) {
+    console.warn(`cmdkey failed (non-fatal): ${e.message}`);
+  }
+
   // ── Launch browser ───────────────────────────────────────────────────────────
   const browser = await chromium.launch({
     headless: false,
@@ -81,23 +98,6 @@ async function main() {
   });
 
   const page = await context.newPage();
-
-  // ── Clear any existing QlikView server-side session ──────────────────────────
-  // QlikView caches sessions per Windows identity.  If bookmark-setup was run
-  // for a different client before, the server will serve that client's ghost
-  // session for this new client too.  Hitting the logout URL forces the server
-  // to invalidate the session before we navigate to the report.
-  console.log('Clearing any existing QlikView session...');
-  try {
-    await page.goto('https://bi.dischem.co.za/QvAJAXZfc/LogOut.htm', {
-      waitUntil: 'domcontentloaded',
-      timeout: 15_000,
-    });
-    await page.waitForTimeout(2_000);
-    console.log(`Logout page: ${page.url()}\n`);
-  } catch {
-    console.log('Logout page unreachable — continuing anyway.\n');
-  }
 
   await page.goto(REPORT_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
   await page.waitForTimeout(3_000);
@@ -142,6 +142,9 @@ async function main() {
     browser.on('disconnected', resolve);
   });
 
+  // Clean up — remove stored credentials so they don't persist on this machine
+  try { execSync(`cmdkey /delete:${HOST}`, { stdio: 'ignore' }); } catch {}
+  console.log(`Windows credentials cleared for ${HOST}.`);
   console.log('\nBrowser closed. Bookmark setup complete.');
 }
 
