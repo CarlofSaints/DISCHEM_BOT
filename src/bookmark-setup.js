@@ -119,19 +119,47 @@ async function main() {
   const cookies = await context.cookies();
   console.log(`Session cookies found: ${cookies.map((c) => c.name).join(', ') || 'none'}`);
 
-  if (cookies.length > 0) {
-    console.log('Clearing cookies to force a fresh QlikView session...');
-    await context.clearCookies();
-    console.log('Reloading...\n');
-    await page.goto(REPORT_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-    await page.waitForTimeout(3_000);
-  } else {
-    console.log('No cookies to clear — QlikView may use server-side session only.\n');
-  }
+  // Clear cookies + localStorage + sessionStorage
+  console.log('Clearing cookies and browser storage...');
+  await context.clearCookies();
+  await page.evaluate(() => {
+    try { localStorage.clear(); } catch {}
+    try { sessionStorage.clear(); } catch {}
+  });
+  console.log('Storage cleared. Reloading...\n');
+  await page.goto(REPORT_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+  await page.waitForTimeout(4_000);
 
-  // Log where we landed after cookie clear
   console.log(`Page URL:   ${page.url()}`);
   console.log(`Page title: ${await page.title()}\n`);
+
+  // ── If we're still on the blank QlikView page, click "Close" ─────────────────
+  // The "Close" link in the blank document view navigates to QlikView's session
+  // management page.  Intercepting that navigation tells us the real logout URL.
+  const closeLink = page.locator('text=Close').first();
+  const isBlank = await closeLink.isVisible({ timeout: 3_000 }).catch(() => false);
+
+  if (isBlank) {
+    console.log('Still on blank QlikView page — clicking "Close" to find the session endpoint...');
+
+    // Listen for where the browser navigates after Close is clicked
+    const navPromise = page.waitForNavigation({
+      waitUntil: 'domcontentloaded',
+      timeout: 15_000,
+    }).catch((e) => ({ timedOut: true, err: e.message }));
+
+    await closeLink.click();
+    const navResult = await navPromise;
+
+    await page.waitForTimeout(2_000);
+    console.log(`After Close — URL:   ${page.url()}`);
+    console.log(`After Close — Title: ${await page.title()}`);
+    if (navResult && navResult.timedOut) {
+      console.log('(Navigation did not complete — Close may be JavaScript-only)\n');
+    } else {
+      console.log('');
+    }
+  }
 
   // Handle QlikView login modal if it appears
   let loggedIn = false;
