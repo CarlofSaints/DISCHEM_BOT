@@ -7,6 +7,7 @@ const { sendSiteDownEmail, sendFileSizeAlert } = require('./email');
 
 const API_URL = (process.env.DCHEM_API_URL ?? '').replace(/\/$/, '');
 const TRIGGER_POLL_MS = 30_000;
+const CONFIG_RELOAD_MS = 5 * 60_000; // re-fetch config every 5 minutes
 
 // ── Cron expression builder ────────────────────────────────────────────────────
 function scheduleToCron(schedule) {
@@ -190,36 +191,33 @@ async function runWithLogging(client, trigger) {
   }
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
-async function main() {
-  console.log(`\nDis-Chem BI Manager — Scheduler starting (${new Date().toLocaleString('en-ZA', { timeZone: 'Africa/Johannesburg' })})`);
-  if (!API_URL) console.warn('DCHEM_API_URL not set — running in local-only mode (no logs or triggers)');
+// ── Config + cron management ──────────────────────────────────────────────────
+let clients = [];           // shared — updated by reloadConfig()
+let activeTasks = [];       // cron.schedule() handles — destroyed on reload
 
-  // Fetch client config from API, fall back to local clients.json
-  let clients = [];
+async function loadClients() {
   if (API_URL) {
     try {
-      clients = await fetchConfig();
-      console.log(`Config fetched from API: ${clients.length} client(s)`);
+      const fetched = await fetchConfig();
+      if (fetched.length) return fetched;
     } catch (err) {
-      console.warn(`API unreachable: ${err.message} — falling back to clients.json`);
+      console.warn(`API unreachable: ${err.message}`);
     }
   }
-  if (!clients.length) {
-    const localPath = path.join(__dirname, '..', 'clients.json');
-    if (fs.existsSync(localPath)) {
-      clients = JSON.parse(fs.readFileSync(localPath, 'utf-8'));
-      console.log(`Local clients.json: ${clients.length} client(s)`);
-    }
+  const localPath = path.join(__dirname, '..', 'clients.json');
+  if (fs.existsSync(localPath)) {
+    return JSON.parse(fs.readFileSync(localPath, 'utf-8'));
   }
+  return [];
+}
 
-  if (!clients.length) {
-    console.warn('No clients found. Add clients via the web UI, then restart the scheduler.');
-  }
+function buildCronJobs(clientList) {
+  // Destroy all existing tasks
+  for (const task of activeTasks) task.stop();
+  activeTasks = [];
 
-  // Build cron jobs (multiple schedules per client)
   let jobCount = 0;
-  for (const client of clients) {
+  for (const client of clientList) {
     const schedules = client.schedules?.length
       ? client.schedules
       : [{ id: 'default', label: 'Default', frequency: 'daily', time: '06:00' }];
@@ -228,14 +226,44 @@ async function main() {
       const expr = scheduleToCron(schedule);
       const label = schedule.label || schedule.frequency;
       console.log(`  Scheduled: [${client.name}] "${label}" → ${expr} (JHB time)`);
-      cron.schedule(expr, () => {
+      const task = cron.schedule(expr, () => {
         console.log(`\n[CRON] ${client.name} — ${label}`);
         runWithLogging(client, 'schedule');
       }, { timezone: 'Africa/Johannesburg' });
+      activeTasks.push(task);
       jobCount++;
     }
   }
-  console.log(`\n${jobCount} cron job(s) active.`);
+  return jobCount;
+}
+
+async function reloadConfig(isInitial = false) {
+  const freshClients = await loadClients();
+  const prev = JSON.stringify(clients.map((c) => c.id + c.updatedAt).sort());
+  const next = JSON.stringify(freshClients.map((c) => c.id + c.updatedAt).sort());
+
+  if (prev === next && !isInitial) return; // no change
+
+  clients = freshClients;
+  const jobCount = buildCronJobs(clients);
+
+  if (isInitial) {
+    if (!clients.length) console.warn('No clients found. Add clients via the web UI — config reloads every 5 min.');
+    else console.log(`\n${jobCount} cron job(s) active.`);
+  } else {
+    console.log(`\n[CONFIG] Reloaded — ${clients.length} client(s), ${jobCount} cron job(s).`);
+  }
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+async function main() {
+  console.log(`\nDis-Chem BI Manager — Scheduler starting (${new Date().toLocaleString('en-ZA', { timeZone: 'Africa/Johannesburg' })})`);
+  if (!API_URL) console.warn('DCHEM_API_URL not set — running in local-only mode (no logs or triggers)');
+
+  await reloadConfig(true);
+
+  // Re-fetch config every 5 minutes to pick up new/changed clients
+  setInterval(() => reloadConfig(false), CONFIG_RELOAD_MS);
 
   // Poll for manual triggers every 30s
   if (API_URL) {
@@ -245,17 +273,16 @@ async function main() {
         for (const clientId of triggers) {
           const client = clients.find((c) => c.id === clientId);
           if (!client) continue;
-          // Delete trigger first to prevent double-run
           await deleteTrigger(clientId).catch(() => {});
           console.log(`\n[MANUAL] Trigger received for: ${client.name}`);
-          runWithLogging(client, 'manual'); // fire-and-forget
+          runWithLogging(client, 'manual');
         }
       } catch {
         // Silently ignore poll failures
       }
       setTimeout(pollTriggers, TRIGGER_POLL_MS);
     }
-    setTimeout(pollTriggers, TRIGGER_POLL_MS); // first poll after 30s
+    setTimeout(pollTriggers, TRIGGER_POLL_MS);
     console.log('Polling for manual triggers every 30s.\n');
   }
 
