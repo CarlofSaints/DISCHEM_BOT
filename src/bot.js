@@ -8,10 +8,9 @@ const REPORT_URL =
   '?document=sales%20analysis%20-%20daily%20detail.qvw' +
   '&lang=en-US&host=QVS%40qv-webserver';
 
-const BOOKMARK_NAME = 'VITAL BOT';
-
 async function runExport(client) {
   const { name, username, password, downloadDir } = client;
+  const bookmarkName = client.bookmarkName || name.toUpperCase() + ' BOT';
 
   if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir, { recursive: true });
   console.log(`\n[${name}] Starting export — ${new Date().toLocaleString()}`);
@@ -85,7 +84,7 @@ async function runExport(client) {
     // ── STEP 5: Open the bookmark ─────────────────────────────────────────────
     // The bookmark selector in QlikView is a TEXT INPUT in the toolbar (not a button).
     // You type the bookmark name and press Enter / select from dropdown.
-    console.log(`[${name}] Opening bookmark "${BOOKMARK_NAME}" via toolbar input...`);
+    console.log(`[${name}] Opening bookmark "${bookmarkName}" via toolbar input...`);
     let bookmarkApplied = false;
 
     // Strategy 1: known selectors for the bookmark input
@@ -106,8 +105,8 @@ async function runExport(client) {
         // Click to focus, triple-click to clear, then type char-by-char to trigger autocomplete
         await el.click({ clickCount: 3 });
         await page.waitForTimeout(300);
-        await el.pressSequentially(BOOKMARK_NAME, { delay: 80 });
-        console.log(`[${name}] Bookmark input found (${sel}), typed "${BOOKMARK_NAME}" — waiting for dropdown...`);
+        await el.pressSequentially(bookmarkName, { delay: 80 });
+        console.log(`[${name}] Bookmark input found (${sel}), typed "${bookmarkName}" — waiting for dropdown...`);
         await page.waitForTimeout(1_500);
 
         // Keyboard-navigate the dropdown: ArrowDown highlights first item, Enter selects it
@@ -129,9 +128,9 @@ async function runExport(client) {
           if (box && box.y < 120) {
             try {
               await input.click({ clickCount: 3 });
-              await input.fill(BOOKMARK_NAME);
+              await input.fill(bookmarkName);
               await input.press('Enter');
-              console.log(`[${name}] Bookmark input found by position (y=${Math.round(box.y)}), typed "${BOOKMARK_NAME}" + Enter.`);
+              console.log(`[${name}] Bookmark input found by position (y=${Math.round(box.y)}), typed "${bookmarkName}" + Enter.`);
               bookmarkApplied = true;
               break;
             } catch {}
@@ -148,8 +147,8 @@ async function runExport(client) {
           const box = await sel.boundingBox();
           if (box && box.y < 120) {
             try {
-              await sel.selectOption({ label: BOOKMARK_NAME });
-              console.log(`[${name}] Bookmark select found by position (y=${Math.round(box.y)}), selected "${BOOKMARK_NAME}".`);
+              await sel.selectOption({ label: bookmarkName });
+              console.log(`[${name}] Bookmark select found by position (y=${Math.round(box.y)}), selected "${bookmarkName}".`);
               bookmarkApplied = true;
               break;
             } catch {}
@@ -224,8 +223,10 @@ async function runExport(client) {
     console.log(`[${name}] Export delivered via: ${exportResult.via}`);
 
     // ── STEP 8: Save file ─────────────────────────────────────────────────────
-    const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const filename = `${name}_StoreTotalSalesDailyByArticle_${dateStr}.xlsx`;
+    const dateStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const channel = (client.channel || 'dischem').toUpperCase();
+    const reportType = (client.reportType || 'SALES').toUpperCase();
+    const filename = `${name.toUpperCase()} ${channel} ${reportType} ${dateStr}.xlsx`;
     const savePath = path.join(downloadDir, filename);
 
     let download;
