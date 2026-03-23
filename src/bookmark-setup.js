@@ -82,8 +82,29 @@ async function main() {
 
   const page = await context.newPage();
 
+  // ── Clear any existing QlikView server-side session ──────────────────────────
+  // QlikView caches sessions per Windows identity.  If bookmark-setup was run
+  // for a different client before, the server will serve that client's ghost
+  // session for this new client too.  Hitting the logout URL forces the server
+  // to invalidate the session before we navigate to the report.
+  console.log('Clearing any existing QlikView session...');
+  try {
+    await page.goto('https://bi.dischem.co.za/QvAJAXZfc/LogOut.htm', {
+      waitUntil: 'domcontentloaded',
+      timeout: 15_000,
+    });
+    await page.waitForTimeout(2_000);
+    console.log(`Logout page: ${page.url()}\n`);
+  } catch {
+    console.log('Logout page unreachable — continuing anyway.\n');
+  }
+
   await page.goto(REPORT_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
   await page.waitForTimeout(3_000);
+
+  // Log where we landed — helps diagnose auth differences between clients
+  console.log(`Page URL:   ${page.url()}`);
+  console.log(`Page title: ${await page.title()}\n`);
 
   // Handle QlikView login modal if it appears
   let loggedIn = false;
