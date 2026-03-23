@@ -140,25 +140,26 @@ async function main() {
   const isBlank = await closeLink.isVisible({ timeout: 3_000 }).catch(() => false);
 
   if (isBlank) {
-    console.log('Still on blank QlikView page — clicking "Close" to find the session endpoint...');
-
-    // Listen for where the browser navigates after Close is clicked
-    const navPromise = page.waitForNavigation({
-      waitUntil: 'domcontentloaded',
-      timeout: 15_000,
-    }).catch((e) => ({ timedOut: true, err: e.message }));
-
+    console.log('Still on blank QlikView page — clicking "Close" (SPA action, not navigation)...');
     await closeLink.click();
-    const navResult = await navPromise;
 
-    await page.waitForTimeout(2_000);
-    console.log(`After Close — URL:   ${page.url()}`);
-    console.log(`After Close — Title: ${await page.title()}`);
-    if (navResult && navResult.timedOut) {
-      console.log('(Navigation did not complete — Close may be JavaScript-only)\n');
-    } else {
-      console.log('');
-    }
+    // Close fires an AJAX call and mutates the DOM in-place — no page navigation.
+    // Wait for QlikView to re-render whatever it shows next (login form, doc list, etc.)
+    await page.waitForTimeout(5_000);
+
+    const afterClosePath = path.join(__dirname, '..', 'debug-after-close.png');
+    await page.screenshot({ path: afterClosePath, fullPage: true });
+    console.log(`After Close — screenshot: ${afterClosePath}`);
+    console.log(`After Close — URL:        ${page.url()}`);
+    console.log(`After Close — Title:      ${await page.title()}\n`);
+
+    // Dump visible text so we can see what QlikView rendered
+    const bodyText = await page.evaluate(() =>
+      document.body.innerText.trim().slice(0, 500)
+    );
+    console.log('Page text after Close (first 500 chars):');
+    console.log(bodyText || '(empty)');
+    console.log('');
   }
 
   // Handle QlikView login modal if it appears
