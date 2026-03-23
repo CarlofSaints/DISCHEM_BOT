@@ -58,4 +58,44 @@ async function sendFileSizeAlert(client, actualKb) {
   await trySend(client.notifyEmail, ALERT_CC, subject, html);
 }
 
-module.exports = { sendSiteDownEmail, sendFileSizeAlert };
+async function sendValidationSuccessEmail(client, log) {
+  const time = new Date(log.timestamp).toLocaleString('en-ZA', { timeZone: 'Africa/Johannesburg' });
+  const trigger = log.trigger === 'manual' ? 'Manual run' : 'Scheduled run';
+  const subject = `[DIS-CHEM BOT] ✓ Export successful — ${client.name} ${client.reportType}`;
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:600px;">
+      <h2 style="color:#16a34a;">✓ Export Successful</h2>
+      <p>The Dis-Chem BI export completed successfully and data has been verified.</p>
+      <table style="border-collapse:collapse;width:100%;font-size:14px;">
+        <tr><td style="padding:4px 8px;color:#666;">Client</td><td style="padding:4px 8px;font-weight:bold;">${client.name}</td></tr>
+        <tr><td style="padding:4px 8px;color:#666;">Report type</td><td style="padding:4px 8px;">${client.reportType}</td></tr>
+        <tr><td style="padding:4px 8px;color:#666;">Exported at</td><td style="padding:4px 8px;">${time}</td></tr>
+        <tr><td style="padding:4px 8px;color:#666;">Latest data date</td><td style="padding:4px 8px;font-weight:bold;">${log.latestDataDate ?? 'n/a'}</td></tr>
+        <tr><td style="padding:4px 8px;color:#666;">Trigger</td><td style="padding:4px 8px;">${trigger}</td></tr>
+        ${log.fileSizeKb ? `<tr><td style="padding:4px 8px;color:#666;">File size</td><td style="padding:4px 8px;">${log.fileSizeKb.toFixed(0)} KB</td></tr>` : ''}
+      </table>
+    </div>`;
+  await trySend(client.notifyEmail, null, subject, html);
+}
+
+async function sendValidationFailEmail(client, log) {
+  const time = new Date(log.timestamp).toLocaleString('en-ZA', { timeZone: 'Africa/Johannesburg' });
+  const attempts = (log.retryCount ?? 0) + 1;
+  const subject = `[DIS-CHEM BOT] ✗ Export failed after ${attempts} attempt${attempts > 1 ? 's' : ''} — ${client.name}`;
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:600px;">
+      <h2 style="color:#dc2626;">✗ Export Failed</h2>
+      <p>The Dis-Chem BI export for <strong>${client.name}</strong> could not be verified after all retry attempts.</p>
+      <table style="border-collapse:collapse;width:100%;font-size:14px;">
+        <tr><td style="padding:4px 8px;color:#666;">Client</td><td style="padding:4px 8px;font-weight:bold;">${client.name}</td></tr>
+        <tr><td style="padding:4px 8px;color:#666;">Report type</td><td style="padding:4px 8px;">${client.reportType}</td></tr>
+        <tr><td style="padding:4px 8px;color:#666;">Last attempt</td><td style="padding:4px 8px;">${time}</td></tr>
+        <tr><td style="padding:4px 8px;color:#666;">Attempts made</td><td style="padding:4px 8px;">${attempts}</td></tr>
+        <tr><td style="padding:4px 8px;color:#666;">Reason</td><td style="padding:4px 8px;color:#dc2626;">${log.message}</td></tr>
+      </table>
+      <p style="margin-top:16px;font-size:13px;color:#666;">Please check the Dis-Chem portal or trigger a manual run once the data is available.</p>
+    </div>`;
+  await trySend(client.notifyEmail, ALERT_CC, subject, html);
+}
+
+module.exports = { sendSiteDownEmail, sendFileSizeAlert, sendValidationSuccessEmail, sendValidationFailEmail };
