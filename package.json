@@ -5,7 +5,8 @@
   "scripts": {
     "run-now": "node src/run-now.js",
     "schedule": "node src/scheduler.js",
-    "capture": "node src/capture.js"
+    "capture": "node src/capture.js",
+    "bookmark-setup": "node src/bookmark-setup.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
