@@ -3,7 +3,7 @@ const cron = require('node-cron');
 const path = require('path');
 const fs = require('fs');
 const { runExport } = require('./bot');
-const { sendSiteDownEmail, sendFileSizeAlert } = require('./email');
+const { sendSiteDownEmail, sendFileSizeAlert, sendValidationSuccessEmail, sendValidationFailEmail } = require('./email');
 
 const API_URL = (process.env.DCHEM_API_URL ?? '').replace(/\/$/, '');
 const TRIGGER_POLL_MS = 30_000;
@@ -179,6 +179,15 @@ async function runWithLogging(client, trigger) {
   }
 
   log.durationMs = log.durationMs ?? (Date.now() - startTime);
+
+  // Send notification emails (fire-and-forget — don't block log posting)
+  if (client.notifyEmail) {
+    if (client.validation?.enabled && log.status === 'success') {
+      sendValidationSuccessEmail(client, log).catch(() => {});
+    } else if (log.status === 'validation_fail') {
+      sendValidationFailEmail(client, log).catch(() => {});
+    }
+  }
 
   // Post log to web app
   if (API_URL) {
